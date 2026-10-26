@@ -1,0 +1,20 @@
+name: SMC Order Block Bot 15m-1D
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'  # checks 15m
+    - cron: '*/30 * * * *'  # checks 30m
+    - cron: '0 * * * *'     # checks 1h
+    - cron: '0 */4 * * *'   # checks 4h
+    - cron: '0 0 * * *'     # checks 1D
+  workflow_dispatch:
+
+jobs:
+  bot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      - run: pip install ccxt pandas
+      - run: python bot.py
