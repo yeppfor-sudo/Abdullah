@@ -1,83 +1,103 @@
-import ccxt, pandas as pd, os
-from datetime import datetime
+import os
+import time
+import ccxt
+import pandas as pd
+import numpy as np
+import requests
 
-SYMBOLS = ["GM/USDT:USDT", "TOSHI/USDT:USDT", "DOPE/USDT:USDT", "PHA/USDT:USDT", "NAORIS/USDT:USDT", "WANGCHAI/USDT:USDT"]
-TIMEFRAMES = ["15m", "30m", "1h", "4h", "1d"]
+# --- Configuration ---
+EXCHANGE_ID = 'mexc'
+SYMBOLS = ['BTC/USDT:USDT', 'ETH/USDT:USDT', 'SOL/USDT:USDT']
+TARGET_TIMEFRAMES = ['2h', '4h', '6h', '8h', '12h', '1d', '3d', '5d', '7d']
 
-exchange = ccxt.mexc({'enableRateLimit': True})
+TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
-def get_df(symbol, tf):
-    ohlcv = exchange.fetch_ohlcv(symbol, tf, limit=200)
-    df = pd.DataFrame(ohlcv, columns=['t','o','h','l','c','v'])
-    return df
-
-def find_order_blocks(df):
-    # High Order Block = last bearish candle before bullish move = Short zone
-    # Low Order Block = last bullish candle before bearish move = Long zone
-    df['is_bull'] = df['c'] > df['o']
-    df['is_bear'] = df['c'] < df['o']
-    # Simplistic detection: high OB
-    high_ob = df[(df['is_bear']) & (df['c'].shift(-1) > df['h'])].tail(1)
-    low_ob = df[(df['is_bull']) & (df['c'].shift(-1) < df['l'])].tail(1)
-    return high_ob, low_ob
-
-def find_fvg(df):
-    # Fair Value Gap: 3 candle pattern with gap
-    fvg_bull = (df['l'].shift(1) > df['h'].shift(3)) & (df['c'] > df['o'])
-    fvg_bear = (df['h'].shift(1) < df['l'].shift(3)) & (df['c'] < df['o'])
-    return fvg_bull.iloc[-1], fvg_bear.iloc[-1]
-
-def find_choch(df):
-    # Change of Character: break of last high/low
-    last_high = df['h'].rolling(20).max().shift(1).iloc[-1]
-    last_low = df['l'].rolling(20).min().shift(1).iloc[-1]
-    close = df['c'].iloc[-1]
-    if close > last_high: return "BULL_CHOCH"
-    if close < last_low: return "BEAR_CHOCH"
-    return "NO_CHOCH"
-
-def scan_symbol(symbol):
-    results = {}
-    for tf in TIMEFRAMES:
-        df = get_df(symbol, tf)
-        if len(df) < 50: continue
-        
-        high_ob, low_ob = find_order_blocks(df)
-        fvg_bull, fvg_bear = find_fvg(df)
-        choch = find_choch(df)
-        last_price = df['c'].iloc[-1]
-        vol_confirm = df['v'].iloc[-1] > df['v'].rolling(10).mean().iloc[-1]
-
-        # YOUR RULE from voice:
-        signal = "WAIT"
-        if not low_ob.empty and fvg_bull and choch == "BULL_CHOCH" and vol_confirm:
-            # Price retapped Low Order Block + FVG + CHoCH = LONG
-            ob_low = low_ob['l'].values[0]
-            if abs(last_price - ob_low)/ob_low < 0.03:  # within 3% of OB
-                signal = "LONG - Low Order Block"
-        if not high_ob.empty and fvg_bear and choch == "BEAR_CHOCH" and vol_confirm:
-            ob_high = high_ob['h'].values[0]
-            if abs(last_price - ob_high)/ob_high < 0.03:
-                signal = "SHORT - High Order Block"
-        
-        results[tf] = {"signal": signal, "choch": choch, "fvg": fvg_bull or fvg_bear, "price": last_price}
-    
-    return results
-
-def run():
-    for sym in SYMBOLS:
+def send_telegram_alert(message):
+    if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}
         try:
-            res = scan_symbol(sym)
-            print(f"\n=== {sym} {datetime.utcnow()} ===")
-            for tf, data in res.items():
-                print(f"{tf}: {data['signal']} | {data['choch']} | Price {data['price']}")
-                # Final filtered signal for your primary TF
-                if tf == "1h" and "LONG" in data['signal']:
-                    print(f">>> ALERT BUY {sym} on {tf}")
-                if tf == "1h" and "SHORT" in data['signal']:
-                    print(f">>> ALERT SELL {sym} on {tf}")
+            requests.post(url, json=payload, timeout=10)
         except Exception as e:
-            print(f"Error {sym} {e}")
+            print(f"Telegram error: {e}")
+    else:
+        print(f"[ALERT] {message}")
+
+def fetch_and_resample_ohlcv(exchange, symbol, tf, limit=500):
+    # Fetch base timeframe data (e.g., 1h or 2h) to resample exotic TFs like 6h, 8h, 3d, 5d, 7d
+    base_tf = '1h' if tf in ['6h', '8h', '3d', '5d', '7d'] else tf
+    try:
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe=base_tf, limit=limit * 3)
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df.set_index('timestamp', inplace=True)
+        
+        # Resample if needed
+        if tf == '6h':
+            df = df.resample('6h').agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'}).dropna()
+        elif tf == '8h':
+            df = df.resample('8h').agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'}).dropna()
+        elif tf == '3d':
+            df = df.resample('3D').agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'}).dropna()
+        elif tf == '5d':
+            df = df.resample('5D').agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'}).dropna()
+        elif tf == '7d':
+            df = df.resample('7D').agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'}).dropna()
+            
+        return df.tail(limit)
+    except Exception as e:
+        print(f"Error fetching {symbol} on {tf}: {e}")
+        return pd.DataFrame()
+
+def analyze_market_structure(df, length=7):
+    if len(df) < length * 2 + 1:
+        return None, None, None
+    
+    # Calculate 20 EMA
+    df['ema20'] = df['close'].ewm(span=20, adjust=False).mean()
+    
+    # Swing highs and lows confirmation
+    df['swing_high'] = df['high'][(df['high'] == df['high'].rolling(window=length*2+1, center=True).max())]
+    df['swing_low'] = df['low'][(df['low'] == df['low'].rolling(window=length*2+1, center=True).min())]
+    
+    last_close = df['close'].iloc[-1]
+    last_ema20 = df['ema20'].iloc[-1]
+    
+    # Recent valid swings for CHoCH / BOS detection
+    valid_highs = df['swing_high'].dropna()
+    valid_lows = df['swing_low'].dropna()
+    
+    if len(valid_highs) < 2 or len(valid_lows) < 2:
+        return "WAITING", last_ema20, False
+        
+    latest_high = valid_highs.iloc[-1]
+    latest_low = valid_lows.iloc[-1]
+    
+    structure = "BULLISH" if last_close > latest_low else "BEARISH"
+    ema_cross = (last_close > last_ema20) if structure == "BULLISH" else (last_close < last_ema20)
+    
+    return structure, last_ema20, ema_cross
+
+def run_scanner():
+    exchange = ccxt.mexc({'options': {'defaultType': 'swap'}} )
+    exchange.load_markets()
+    
+    for symbol in SYMBOLS:
+        for tf in TARGET_TIMEFRAMES:
+            df = fetch_and_resample_ohlcv(exchange, symbol, tf)
+            if df.empty:
+                continue
+                
+            structure, ema20, ema_ok = analyze_market_structure(df)
+            last_close = df['close'].iloc[-1]
+            
+            # Condition for alert setup (CHoCH/BOS alignment with 20 EMA)
+            if ema_ok and structure in ["BULLISH", "BEARISH"]:
+                msg = f"🚨 *Setup Detected*\nSymbol: `{symbol}`\nTF: `{tf}`\nStructure: *{structure}*\nClose: `{last_close}`\n20 EMA: `{ema20:.4f}`"
+                send_telegram_alert(msg)
+                
+            time.sleep(exchange.rateLimit / 1000)
 
 if __name__ == "__main__":
-    run()
+    run_scanner()
