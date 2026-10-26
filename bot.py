@@ -1,103 +1,258 @@
-import os
-import time
-import ccxt
-import pandas as pd
-import numpy as np
-import requests
+import os, ccxt, pandas as pd, requests, json, time, pytz
+from datetime import datetime
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 
-# --- Configuration ---
-EXCHANGE_ID = 'mexc'
-SYMBOLS = ['BTC/USDT:USDT', 'ETH/USDT:USDT', 'SOL/USDT:USDT']
-TARGET_TIMEFRAMES = ['2h', '4h', '6h', '8h', '12h', '1d', '3d', '5d', '7d']
+TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHAT = os.getenv("CHAT_ID")
+PKT = pytz.timezone('Asia/Karachi')
+HIST_FILE = "alerts_history.json"
+TIMEFRAMES = ['2h','4h','6h','8h','12h','1d','3d','5d','7d','30d']
+FRACTAL_LEN = 7
+REQUIRE_BODY = True # Break With Close = True like Pine
+COOLDOWN = 24
 
-TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
-
-def send_telegram_alert(message):
-    if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}
-        try:
-            requests.post(url, json=payload, timeout=10)
-        except Exception as e:
-            print(f"Telegram error: {e}")
-    else:
-        print(f"[ALERT] {message}")
-
-def fetch_and_resample_ohlcv(exchange, symbol, tf, limit=500):
-    # Fetch base timeframe data (e.g., 1h or 2h) to resample exotic TFs like 6h, 8h, 3d, 5d, 7d
-    base_tf = '1h' if tf in ['6h', '8h', '3d', '5d', '7d'] else tf
+def send_msg(t):
+    requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+        json={"chat_id":CHAT,"text":t,"parse_mode":"Markdown"}, timeout=20)
+def send_photo(p,c):
+    with open(p,'rb') as f:
+        requests.post(f"https://api.telegram.org/bot{TOKEN}/sendPhoto",
+            data={"chat_id":CHAT,"caption":c,"parse_mode":"Markdown"}, files={"photo":f}, timeout=30)
+def load_hist():
     try:
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe=base_tf, limit=limit * 3)
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        df.set_index('timestamp', inplace=True)
+        with open(HIST_FILE,'r') as f: return json.load(f)
+    except: return {}
+def save_hist(d):
+    with open(HIST_FILE,'w') as f: json.dump(d,f)
+
+exchange = ccxt.mexc({'enableRateLimit': True, 'options':{'defaultType':'swap'}})
+exchange.load_markets()
+
+def fetch_tf(sym, tf):
+    try:
+        if tf in ['2h','4h','6h','8h','12h']:
+            h=int(tf.replace('h',''))
+            ohlcv=exchange.fetch_ohlcv(sym,'1h',limit=600)
+            df=pd.DataFrame(ohlcv, columns=['t','o','h','l','c','v'])
+            df['time']=pd.to_datetime(df['t'], unit='ms', utc=True)
+            df.set_index('time', inplace=True)
+            df=df.resample(f'{h}h').agg({'o':'first','h':'max','l':'min','c':'last','v':'sum'}).dropna().reset_index()
+            return df
+        elif tf=='1d':
+            ohlcv=exchange.fetch_ohlcv(sym,'1d',limit=400)
+            df=pd.DataFrame(ohlcv, columns=['t','o','h','l','c','v'])
+            df['time']=pd.to_datetime(df['t'], unit='ms', utc=True)
+            return df
+        else:
+            rule={'3d':'3D','5d':'5D','7d':'7D','30d':'30D'}[tf]
+            need=900 if tf=='30d' else 500
+            ohlcv=exchange.fetch_ohlcv(sym,'1d',limit=need)
+            df=pd.DataFrame(ohlcv, columns=['t','o','h','l','c','v'])
+            df['time']=pd.to_datetime(df['t'], unit='ms', utc=True)
+            df.set_index('time', inplace=True)
+            df=df.resample(rule).agg({'o':'first','h':'max','l':'min','c':'last','v':'sum'}).dropna().reset_index()
+            return df
+    except: return None
+
+def is_pivot_high(df, idx, length):
+    if idx < length or idx >= len(df)-length: return False
+    window = df['h'].iloc[idx-length:idx+length+1]
+    return df['h'].iloc[idx] == window.max()
+
+def is_pivot_low(df, idx, length):
+    if idx < length or idx >= len(df)-length: return False
+    window = df['l'].iloc[idx-length:idx+length+1]
+    return df['l'].iloc[idx] == window.min()
+
+def detect_choch(df):
+    if len(df) < 100: return None
+    # State like Pine
+    upperLevel = None
+    lowerLevel = None
+    upperBroken = False
+    lowerBroken = False
+    marketDirection = 0 # 1 bull, -1 bear
+    activeDirection = 0
+    choch_events = []
+    
+    # Loop like Pine structureLeg
+    for i in range(FRACTAL_LEN, len(df)-1):
+        # Detect new pivots at i
+        if is_pivot_high(df, i, FRACTAL_LEN):
+            if not upperBroken:
+                pass
+            upperLevel = float(df['h'].iloc[i])
+            upperBroken = False
+        if is_pivot_low(df, i, FRACTAL_LEN):
+            lowerLevel = float(df['l'].iloc[i])
+            lowerBroken = False
         
-        # Resample if needed
-        if tf == '6h':
-            df = df.resample('6h').agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'}).dropna()
-        elif tf == '8h':
-            df = df.resample('8h').agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'}).dropna()
-        elif tf == '3d':
-            df = df.resample('3D').agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'}).dropna()
-        elif tf == '5d':
-            df = df.resample('5D').agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'}).dropna()
-        elif tf == '7d':
-            df = df.resample('7D').agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'}).dropna()
+        if upperLevel is None or lowerLevel is None:
+            continue
             
-        return df.tail(limit)
-    except Exception as e:
-        print(f"Error fetching {symbol} on {tf}: {e}")
-        return pd.DataFrame()
-
-def analyze_market_structure(df, length=7):
-    if len(df) < length * 2 + 1:
-        return None, None, None
-    
-    # Calculate 20 EMA
-    df['ema20'] = df['close'].ewm(span=20, adjust=False).mean()
-    
-    # Swing highs and lows confirmation
-    df['swing_high'] = df['high'][(df['high'] == df['high'].rolling(window=length*2+1, center=True).max())]
-    df['swing_low'] = df['low'][(df['low'] == df['low'].rolling(window=length*2+1, center=True).min())]
-    
-    last_close = df['close'].iloc[-1]
-    last_ema20 = df['ema20'].iloc[-1]
-    
-    # Recent valid swings for CHoCH / BOS detection
-    valid_highs = df['swing_high'].dropna()
-    valid_lows = df['swing_low'].dropna()
-    
-    if len(valid_highs) < 2 or len(valid_lows) < 2:
-        return "WAITING", last_ema20, False
+        close = float(df['c'].iloc[i])
+        high = float(df['h'].iloc[i])
+        low = float(df['l'].iloc[i])
         
-    latest_high = valid_highs.iloc[-1]
-    latest_low = valid_lows.iloc[-1]
-    
-    structure = "BULLISH" if last_close > latest_low else "BEARISH"
-    ema_cross = (last_close > last_ema20) if structure == "BULLISH" else (last_close < last_ema20)
-    
-    return structure, last_ema20, ema_cross
-
-def run_scanner():
-    exchange = ccxt.mexc({'options': {'defaultType': 'swap'}} )
-    exchange.load_markets()
-    
-    for symbol in SYMBOLS:
-        for tf in TARGET_TIMEFRAMES:
-            df = fetch_and_resample_ohlcv(exchange, symbol, tf)
-            if df.empty:
-                continue
-                
-            structure, ema20, ema_ok = analyze_market_structure(df)
-            last_close = df['close'].iloc[-1]
+        # Break detection - Require Close like your Pine
+        breakUp = False
+        breakDown = False
+        if not upperBroken and upperLevel:
+            if REQUIRE_BODY:
+                if close > upperLevel: # crossover close
+                    # check previous close below
+                    if float(df['c'].iloc[i-1]) <= upperLevel:
+                        breakUp = True
+            else:
+                if high > upperLevel:
+                    breakUp = True
+        
+        if not lowerBroken and lowerLevel:
+            if REQUIRE_BODY:
+                if close < lowerLevel:
+                    if float(df['c'].iloc[i-1]) >= lowerLevel:
+                        breakDown = True
+            else:
+                if low < lowerLevel:
+                    breakDown = True
+        
+        if breakUp:
+            upperBroken = True
+            bullChoch = (marketDirection == -1)
+            bullBos = (marketDirection == 1)
+            if bullChoch:
+                activeDirection = 1
+                # CHoCH Box calculation like Pine
+                rangeBottom = lowerLevel
+                rangeTop = high
+                eq = (rangeTop + rangeBottom)/2
+                choch_events.append({
+                    'type': 'BULL_CHOCH',
+                    'bar': i,
+                    'price': close,
+                    'upper': upperLevel,
+                    'lower': lowerLevel,
+                    'eq': eq,
+                    'rangeTop': rangeTop,
+                    'rangeBottom': rangeBottom,
+                    'fib_top': rangeBottom + (rangeTop-rangeBottom)*0.618,
+                    'fib_bot': rangeBottom + (rangeTop-rangeBottom)*0.382,
+                })
+            elif bullBos:
+                choch_events.append({'type':'BULL_BOS','bar':i,'price':close})
+            marketDirection = 1
             
-            # Condition for alert setup (CHoCH/BOS alignment with 20 EMA)
-            if ema_ok and structure in ["BULLISH", "BEARISH"]:
-                msg = f"🚨 *Setup Detected*\nSymbol: `{symbol}`\nTF: `{tf}`\nStructure: *{structure}*\nClose: `{last_close}`\n20 EMA: `{ema20:.4f}`"
-                send_telegram_alert(msg)
-                
-            time.sleep(exchange.rateLimit / 1000)
+        if breakDown:
+            lowerBroken = True
+            bearChoch = (marketDirection == 1)
+            bearBos = (marketDirection == -1)
+            if bearChoch:
+                activeDirection = -1
+                rangeTop = upperLevel
+                rangeBottom = low
+                eq = (rangeTop + rangeBottom)/2
+                choch_events.append({
+                    'type': 'BEAR_CHOCH',
+                    'bar': i,
+                    'price': close,
+                    'upper': upperLevel,
+                    'lower': lowerLevel,
+                    'eq': eq,
+                    'rangeTop': rangeTop,
+                    'rangeBottom': rangeBottom,
+                    'fib_top': rangeTop - (rangeTop-rangeBottom)*0.382,
+                    'fib_bot': rangeTop - (rangeTop-rangeBottom)*0.618,
+                })
+            elif bearBos:
+                choch_events.append({'type':'BEAR_BOS','bar':i,'price':close})
+            marketDirection = -1
+    
+    if not choch_events:
+        return None
+    last_event = choch_events[-1]
+    # Only alert if CHoCH is on last closed candle (or 1 bar ago)
+    if last_event['bar'] < len(df)-3: # too old
+        return None
+    if 'CHOCH' not in last_event['type']:
+        return None
+    
+    return last_event
 
-if __name__ == "__main__":
-    run_scanner()
+def draw_choch(df, sym, tf, sig):
+    fig, ax = plt.subplots(figsize=(13,6), facecolor='black')
+    ax.set_facecolor('black')
+    view = df.tail(70).copy()
+    x = range(len(view))
+    # candles
+    for i,(_,r) in enumerate(view.iterrows()):
+        col='#089981' if r['c']>=r['o'] else '#f23645'
+        ax.plot([i,i],[r['l'],r['h']],color=col,lw=1)
+        ax.plot([i,i],[r['o'],r['c']],color=col,lw=4)
+    # BLVL levels
+    if sig.get('upper'):
+        ax.axhline(sig['upper'], color='gray', ls=':', lw=1, label=f"BLVL High {sig['upper']:.5f}")
+    if sig.get('lower'):
+        ax.axhline(sig['lower'], color='gray', ls=':', lw=1, label=f"BLVL Low {sig['lower']:.5f}")
+    # CHoCH box
+    if sig['type']=='BULL_CHOCH':
+        ax.axhspan(sig['rangeBottom'], sig['rangeTop'], color='#089981', alpha=0.15)
+        ax.axhline(sig['eq'], color='#089981', ls='--', lw=1, label=f"EQ {sig['eq']:.5f}")
+        # Buy Zone 0.382-0.618
+        ax.axhspan(sig['fib_bot'], sig['fib_top'], color='#089981', alpha=0.35, label="Buy Zone 0.382-0.618")
+        # Targets
+        rng = sig['rangeTop']-sig['rangeBottom']
+        ax.axhline(sig['rangeBottom']+rng*1.55, color='#089981', ls='--', alpha=0.5)
+        ax.axhline(sig['rangeBottom']+rng*2.68, color='#089981', ls='--', alpha=0.5)
+    else:
+        ax.axhspan(sig['rangeBottom'], sig['rangeTop'], color='#f23645', alpha=0.15)
+        ax.axhline(sig['eq'], color='#f23645', ls='--', lw=1, label=f"EQ {sig['eq']:.5f}")
+        ax.axhspan(sig['fib_bot'], sig['fib_top'], color='#f23645', alpha=0.35, label="Sell Zone 0.382-0.618")
+    
+    last_idx = len(view)-1
+    ax.scatter(last_idx, sig['price'], color='white', s=100, zorder=5)
+    ax.text(last_idx, sig['price'], f" {sig['type']}", color='white', weight='bold', fontsize=9)
+    
+    ax.set_title(f"{sym} {tf} | {sig['type']} | Price {sig['price']:.6f} | PKT {datetime.now(PKT).strftime('%H:%M')}", color='white')
+    ax.legend(facecolor='black', labelcolor='white', fontsize=7)
+    ax.grid(alpha=0.1)
+    plt.tight_layout()
+    path=f"chart_{sym.replace('/','')}_{tf}.png"
+    plt.savefig(path,dpi=150,facecolor='black')
+    plt.close()
+    return path
+
+hist=load_hist()
+syms=[s for s in exchange.markets if s.endswith('/USDT:USDT')]
+try:
+    tickers=exchange.fetch_tickers()
+    syms=[s for s in syms if tickers.get(s,{}).get('quoteVolume',0)>400_000]
+except: pass
+syms=syms[:120]
+found=0
+now=datetime.now(PKT)
+
+for sym in syms:
+    if sym in hist and time.time()-hist[sym] < COOLDOWN*3600: continue
+    for tf in TIMEFRAMES:
+        df=fetch_tf(sym,tf)
+        if df is None or len(df)<100: continue
+        sig=detect_choch(df)
+        if not sig: continue
+        
+        chart=draw_choch(df,sym,tf,sig)
+        if 'BULL' in sig['type']:
+            cap=f"🟢 *{sig['type']}*\n\n*Pair:* {sym}\n*TF:* {tf} Closed\n*CHoCH Price:* `{sig['price']:.6f}`\n*BLVL Break:* `{sig['upper']:.6f}`\n*EQ:* `{sig['eq']:.6f}`\n*Buy Zone:* `{sig['fib_bot']:.6f}` - `{sig['fib_top']:.6f}`\n*SL:* Below `{sig['rangeBottom']:.6f}`\n*Target 1.55:* `{(sig['rangeBottom'] + (sig['rangeTop']-sig['rangeBottom'])*1.55):.6f}`\n*Time PKT:* {now.strftime('%Y-%m-%d %I:%M %p')}"
+        else:
+            cap=f"🔴 *{sig['type']}*\n\n*Pair:* {sym}\n*TF:* {tf} Closed\n*CHoCH Price:* `{sig['price']:.6f}`\n*BLVL Break:* `{sig['lower']:.6f}`\n*EQ:* `{sig['eq']:.6f}`\n*Sell Zone:* `{sig['fib_bot']:.6f}` - `{sig['fib_top']:.6f}`\n*SL:* Above `{sig['rangeTop']:.6f}`\n*Time PKT:* {now.strftime('%Y-%m-%d %I:%M %p')}"
+        
+        send_photo(chart,cap)
+        hist[sym]=time.time()
+        save_hist(hist)
+        found+=1
+        time.sleep(1)
+        break
+
+if found==0:
+    send_msg("*please patience* No CHoCH - Scan done")
