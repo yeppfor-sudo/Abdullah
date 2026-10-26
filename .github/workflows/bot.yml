@@ -1,20 +1,32 @@
-name: SMC Order Block Bot 15m-1D
+name: Crypto CHoCH & 20 EMA Scanner
 
 on:
   schedule:
-    - cron: '*/15 * * * *'  # checks 15m
-    - cron: '*/30 * * * *'  # checks 30m
-    - cron: '0 * * * *'     # checks 1h
-    - cron: '0 */4 * * *'   # checks 4h
-    - cron: '0 0 * * *'     # checks 1D
-  workflow_dispatch:
+    - cron: '0 */4 * * *'  # Runs every 4 hours
+  workflow_dispatch:        # Allows manual run from GitHub Actions tab
 
 jobs:
-  bot:
+  run-scanner:
     runs-on: ubuntu-latest
+    
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: '3.11' }
-      - run: pip install ccxt pandas
-      - run: python bot.py
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install ccxt pandas numpy requests
+
+      - name: Run Market Structure Scanner
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python scanner.py
