@@ -1,18 +1,21 @@
-name: MEXC CHoCH Setup Bot
+name: Entry Model Series 1-10 Bot
+
 on:
   schedule:
-    - cron: '5 */2 * * *'  # Every 2h at 05 = after candle close
+    - cron: '*/15 * * * *'  # 15m
+    - cron: '*/30 * * * *'  # 30m
+    - cron: '0 * * * *'     # 1h
+    - cron: '0 */4 * * *'   # 4h
+    - cron: '0 0 * * *'     # 1D
   workflow_dispatch:
+
 jobs:
-  scan:
+  trade:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-      - run: pip install ccxt pandas requests matplotlib pytz
-      - run: python bot.py
-        env:
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          CHAT_ID: ${{ secrets.CHAT_ID }}
+        with: { python-version: '3.11' }
+      - run: pip install ccxt pandas
+      - name: Run Entry Models 01-10
+        run: python bot.py
