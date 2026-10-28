@@ -1,21 +1,64 @@
-name: Entry Model Series 1-10 Bot
+# bot.py - MEXC 8-Part SMC Bot | 5m 15m 1h 4h 1d + Volume
+import ccxt, pandas as pd, time, os, requests
 
-on:
-  schedule:
-    - cron: '*/15 * * * *'  # 15m
-    - cron: '*/30 * * * *'  # 30m
-    - cron: '0 * * * *'     # 1h
-    - cron: '0 */4 * * *'   # 4h
-    - cron: '0 0 * * *'     # 1D
-  workflow_dispatch:
+COINS = ["PHA/USDT:USDT", "GM/USDT:USDT", "KOMA/USDT:USDT", "WANGCHAI/USDT:USDT"]
+TFS = ["5m", "15m", "1h", "4h", "1d"]
+mexc = ccxt.mexc({"enableRateLimit": True})
 
-jobs:
-  trade:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: '3.11' }
-      - run: pip install ccxt pandas
-      - name: Run Entry Models 01-10
-        run: python bot.py
+TG_TOKEN = os.getenv("TG_TOKEN")
+TG_CHAT = os.getenv("TG_CHAT")
+
+def tg(msg):
+    if TG_TOKEN and TG_CHAT:
+        try:
+            requests.get(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+                         params={"chat_id": TG_CHAT, "text": msg}, timeout=10)
+        except: pass
+    print(msg)
+
+def get_df(sym, tf):
+    ohlcv = mexc.fetch_ohlcv(sym, tf, limit=120)
+    df = pd.DataFrame(ohlcv, columns=["t","o","h","l","c","v"])
+    df["ma5"] = df["v"].rolling(5).mean()
+    df["ma10"] = df["v"].rolling(10).mean()
+    return df
+
+def analyze(sym, tf, df):
+    last = df.iloc[-1]
+    # 8 - Volume: PHA Vol:39K MA5:161K MA10:134K
+    vol_ok = last["v"] > last["ma5"] > last["ma10"]
+    # 1 - Liquidity Sweep
+    sweep_high = last["h"] > df["h"].iloc[-20:-2].max()
+    sweep_low = last["l"] < df["l"].iloc[-20:-2].min()
+    # 3/4 - Trend
+    up = df["h"].iloc[-1] > df["h"].iloc[-10] and df["l"].iloc[-1] > df["l"].iloc[-10]
+    trend = "UPTREND" if up else "DOWNTREND"
+    # 2/5/6 - OB + FVG + Supply/Demand
+    bullish_ob = df.iloc[-4]["c"] < df.iloc[-4]["o"] and last["c"] > df.iloc[-3:]["h"].max()
+    bearish_ob = df.iloc[-4]["c"] > df.iloc[-4]["o"] and last["c"] < df.iloc[-3:]["l"].min()
+    fvg = df.iloc[-2]["l"] > df.iloc[-4]["h"] or df.iloc[-2]["h"] < df.iloc[-4]["l"]
+
+    if not vol_ok:
+        return None
+    
+    if bullish_ob and fvg:
+        # PART 3 + 6: Uptrend + Demand Zone (PHA 0.0466)
+        if trend == "UPTREND" or sweep_low:
+            return f"🟢 LONG {sym} {tf} | DEMAND {last['c']:.6f} | OB+FVG | {trend} | Vol {last['v']:.0f}>{last['ma5']:.0f}"
+    if bearish_ob and fvg:
+        # PART 4 + 5: Downtrend + Supply Zone (PHA 0.04967)
+        if trend == "DOWNTREND" or sweep_high:
+            return f"🔴 SHORT {sym} {tf} | SUPPLY {last['c']:.6f} | OB+FVG | {trend} | Vol {last['v']:.0f}>{last['ma5']:.0f}"
+    return None
+
+if __name__ == "__main__":
+    for coin in COINS:
+        for tf in TFS:
+            try:
+                df = get_df(coin, tf)
+                sig = analyze(coin, tf, df)
+                if sig:
+                    tg(sig)
+                time.sleep(0.5)
+            except Exception as e:
+                print(f"Skip {coin} {tf}: {e}")
