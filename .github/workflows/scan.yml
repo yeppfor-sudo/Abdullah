@@ -25,6 +25,7 @@ jobs:
         run: |
           git config --global user.name "bot"
           git config --global user.email "bot@bot.com"
+          if [ ! -f alerts_history.json ]; then echo '{}' > alerts_history.json; fi
           git add alerts_history.json || true
           git diff --staged --quiet || git commit -m "update history" || true
           git push || true
