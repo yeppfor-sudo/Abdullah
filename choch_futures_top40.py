@@ -34,13 +34,6 @@ def load_hist():
     except: return {}
 def save_hist(d): json.dump(d, open(HIST_FILE,'w'))
 
-def get_48h_gain(ex, sym):
-    try:
-        o=ex.fetch_ohlcv(sym,'1d',limit=4)
-        if len(o)<3: return -999
-        return (o[-2][4]/o[-3][4]-1)*100
-    except: return -999
-
 def is_pivot_high(df,i,l): 
     if i<l or i>=len(df)-l: return False
     return df['h'].iloc[i]==df['h'].iloc[i-l:i+l+1].max()
@@ -90,7 +83,7 @@ def draw(df,sym,sig,exn,tf,gain):
     ax.axhline(sig['lower'],color='white',ls='--',lw=1.2,label=f"BREAK {sig['lower']:.6f}")
     ax.axhspan(sig['fib_bot'],sig['fib_top'],color='#f23645',alpha=0.45,label="SELL ZONE")
     ax.axhline(live,color='yellow',lw=1.2,label=f"LIVE {live:.6f}")
-    ax.set_title(f"{sym} {exn} {tf} BEAR CHoCH | 48h +{gain:.1f}% | FUT PERP",color='white',fontweight='bold')
+    ax.set_title(f"{sym} MEXC {tf} BEAR CHoCH | 24h +{gain:.1f}% | FUT PERP",color='white',fontweight='bold')
     ax.legend(facecolor='black',labelcolor='white',fontsize=7); ax.grid(alpha=0.15); plt.tight_layout()
     p=f"chart_{sym.replace('/','').replace(':','')}_{tf}.png"; plt.savefig(p,dpi=150,facecolor='black'); plt.close(); return p,live
 
@@ -98,16 +91,29 @@ hist=load_hist()
 now=datetime.now(PKT)
 found=0
 
-print("Starting MEXC FUT PERP scan...", flush=True)
+print("Starting MEXC FAST scan...", flush=True)
 ex=ccxt.mexc({'enableRateLimit':True,'options':{'defaultType':'swap'}})
 ex.load_markets()
-syms=[s for s in ex.markets if is_futures_perp_crypto(s)]
-print(f"Total PERP symbols: {len(syms)}", flush=True)
+
+print("Fetching tickers - 1 call for all 759 pairs...", flush=True)
+tickers = ex.fetch_tickers()
+print(f"Got {len(tickers)} tickers", flush=True)
 
 gainers=[]
-for s in syms:
-    g=get_48h_gain(ex,s)
-    if g>-999: gainers.append((s,g))
+for sym,t in tickers.items():
+    if not is_futures_perp_crypto(sym): continue
+    # use 24h change from ticker - INSTANT
+    try:
+        ch = t.get('percentage')
+        if ch is None: 
+            # fallback to change
+            ch = t.get('info',{}).get('riseFallRate')
+            if ch: ch = float(ch)*100
+        if ch is None: continue
+        if ch>0:
+            gainers.append((sym,float(ch)))
+    except: continue
+
 gainers.sort(key=lambda x:x[1],reverse=True)
 top=gainers[:TOP_GAINERS]
 
@@ -115,22 +121,25 @@ top_display=[]
 for s,c in top[:10]:
     coin=s.split('/')[0]
     top_display.append(f"{coin} {c:.1f}%")
-print(f"MEXC TOP {TOP_GAINERS}: {top_display}", flush=True)
+print(f"MEXC TOP {TOP_GAINERS} FUT PERP: {top_display}", flush=True)
 
 for sym,gain in top:
-    if gain<1: continue
     coin_name=sym.split('/')[0].upper()
     if coin_name in hist and time.time()-hist[coin_name]<COOLDOWN*3600:
-        print(f"Skip {coin_name} - already sent in 24h", flush=True)
+        print(f"Skip {coin_name} - sent in 24h", flush=True)
         continue
     for tf in TIMEFRAMES:
-        print(f"Checking {coin_name} {tf} gain {gain:.1f}%", flush=True)
+        print(f"Checking {coin_name} {tf} +{gain:.1f}%", flush=True)
         df=fetch_tf(ex,sym,tf)
-        if df is None or len(df)<100: continue
+        if df is None or len(df)<100: 
+            print(f"  No data {coin_name}", flush=True)
+            continue
         sig=detect_bearish_choch(df)
-        if not sig: continue
+        if not sig: 
+            print(f"  No CHoCH {coin_name} {tf}", flush=True)
+            continue
         chart,live=draw(df,sym,sig,'MEXC',tf,gain)
-        cap=f"🔴 *BEAR CHoCH {tf} FUT PERP*\n\n*Pair:* `{sym}` | MEXC\n*48h:* `+{gain:.2f}%` TOP {TOP_GAINERS} FUTURES\n*Break:* `{sig['lower']:.6f}`\n*Sell Zone:* `{sig['fib_bot']:.6f}`-`{sig['fib_top']:.6f}`\n*SL:* `{sig['rangeTop']:.6f}`\n*Live:* `{live:.6f}`\n*Time:* {now.strftime('%H:%M PKT')}"
+        cap=f"🔴 *BEAR CHoCH {tf} FUT PERP*\n\n*Pair:* `{sym}` | MEXC\n*24h:* `+{gain:.2f}%` TOP {TOP_GAINERS} FUTURES\n*Break:* `{sig['lower']:.6f}`\n*Sell Zone:* `{sig['fib_bot']:.6f}`-`{sig['fib_top']:.6f}`\n*SL:* `{sig['rangeTop']:.6f}`\n*Live:* `{live:.6f}`"
         send_photo(chart,cap)
         hist[coin_name]=time.time()
         save_hist(hist)
@@ -139,4 +148,4 @@ for sym,gain in top:
         time.sleep(0.5)
         break
 
-print(f"Done. Found {found}", flush=True)
+print(f"Done. Found {found} | Total time <60s", flush=True)
