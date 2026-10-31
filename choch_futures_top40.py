@@ -9,10 +9,9 @@ CHAT = os.getenv("CHAT_ID")
 PKT = pytz.timezone('Asia/Karachi')
 HIST_FILE = "alerts_history.json"
 FRACTAL_LEN = 5
-COOLDOWN = 24  # <-- CHANGED to 24h
+COOLDOWN = 24
 TOP_GAINERS = 40
 TIMEFRAMES = ['10m', '15m']
-SILENT = True
 
 BLOCK = {'BTC','ETH','SOL','BNB','TRX','XRP','ADA','DOGE','AVAX','DOT','LINK','LTC','BCH','XLM','ETC','HBAR','APT','NEAR','UNI','FIL','ARB','OP','ATOM','MATIC','POL','TON','SHIB','PEPE','CRO','LEO','OKB','BGB','SUI','LDO','RNDR','TAO','FET','WIF','ENA','JUP','SEI','TIA','ONDO','W','PYTH','STRK','JTO','ENS','GOLD','SILVER','XAU','XAG','PAXG','OIL','STOCK','ETF','USDC','FDUSD','TRY','EUR','JPY'}
 
@@ -20,21 +19,15 @@ def is_futures_perp_crypto(sym):
     if not sym.endswith('USDT:USDT'): return False
     base = sym.split('/')[0].upper()
     if base in BLOCK: return False
-    if any(x in sym for x in ['STOCK','ETF','GOLD','SILVER','OIL','XAU','XAG','PAXG','EUR','TRY','JPY']): return False
     if len(base)<2 or len(base)>8: return False
     if any(c.isdigit() for c in base): return False
     if not base.isalpha(): return False
     return True
 
-def send_msg(t):
-    try: requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage", json={"chat_id":CHAT,"text":t,"parse_mode":"Markdown"}, timeout=20)
-    except: pass
-    print(t)
-
 def send_photo(p,c):
     try:
         with open(p,'rb') as f: requests.post(f"https://api.telegram.org/bot{TOKEN}/sendPhoto", data={"chat_id":CHAT,"caption":c,"parse_mode":"Markdown"}, files={"photo":f}, timeout=30)
-    except Exception as e: print(e)
+    except Exception as e: print(f"Photo fail {e}", flush=True)
 
 def load_hist():
     try: return json.load(open(HIST_FILE))
@@ -57,8 +50,7 @@ def is_pivot_low(df,i,l):
 
 def detect_bearish_choch(df):
     if len(df)<100: return None
-    upper=lower=None; direction=0; events=[]
-    upB=lowB=False
+    upper=lower=None; direction=0; events=[]; upB=lowB=False
     for i in range(FRACTAL_LEN,len(df)-1):
         if is_pivot_high(df,i,FRACTAL_LEN): upper=float(df['h'].iloc[i]); upB=False
         if is_pivot_low(df,i,FRACTAL_LEN): lower=float(df['l'].iloc[i]); lowB=False
@@ -78,14 +70,14 @@ def detect_bearish_choch(df):
 def fetch_tf(ex,sym,tf):
     try:
         if tf=='10m':
-            o=ex.fetch_ohlcv(sym,'1m',limit=800)
+            o=ex.fetch_ohlcv(sym,'5m',limit=160)
             df=pd.DataFrame(o,columns=['t','o','h','l','c','v'])
             df['time']=pd.to_datetime(df['t'],unit='ms',utc=True)
             df.set_index('time',inplace=True)
             df=df.resample('10min').agg({'o':'first','h':'max','l':'min','c':'last','v':'sum'}).dropna().reset_index()
             return df
         else:
-            o=ex.fetch_ohlcv(sym,'15m',limit=500)
+            o=ex.fetch_ohlcv(sym,'15m',limit=200)
             return pd.DataFrame(o,columns=['t','o','h','l','c','v'])
     except: return None
 
@@ -102,55 +94,49 @@ def draw(df,sym,sig,exn,tf,gain):
     ax.legend(facecolor='black',labelcolor='white',fontsize=7); ax.grid(alpha=0.15); plt.tight_layout()
     p=f"chart_{sym.replace('/','').replace(':','')}_{tf}.png"; plt.savefig(p,dpi=150,facecolor='black'); plt.close(); return p,live
 
-EXS=[
-    ('MEXC',ccxt.mexc,{'enableRateLimit':True,'options':{'defaultType':'swap'}}),
-    ('BINANCE',ccxt.binanceusdm,{'enableRateLimit':True}),
-    ('OKX',ccxt.okx,{'enableRateLimit':True,'options':{'defaultType':'swap'}}),
-    ('GATE',ccxt.gate,{'enableRateLimit':True,'options':{'defaultType':'swap'}}),
-    ('BITGET',ccxt.bitget,{'enableRateLimit':True,'options':{'defaultType':'swap'}}),
-]
+hist=load_hist()
+now=datetime.now(PKT)
+found=0
 
-hist=load_hist(); now=datetime.now(PKT); found=0
+print("Starting MEXC FUT PERP scan...", flush=True)
+ex=ccxt.mexc({'enableRateLimit':True,'options':{'defaultType':'swap'}})
+ex.load_markets()
+syms=[s for s in ex.markets if is_futures_perp_crypto(s)]
+print(f"Total PERP symbols: {len(syms)}", flush=True)
 
-for exn,cls,opts in EXS:
-    try:
-        ex=cls(opts); ex.load_markets()
-        syms=[s for s in ex.markets if is_futures_perp_crypto(s)]
-        gainers=[]
-        for s in syms:
-            g=get_48h_gain(ex,s)
-            if g>-999: gainers.append((s,g))
-        gainers.sort(key=lambda x:x[1],reverse=True)
-        top=gainers[:TOP_GAINERS]
-        top_display = []
-        for s,c in top[:8]:
-            coin = s.split('/')[0]
-            top_display.append(f"{coin} {c:.1f}%")
-        print(f"{exn} FUT PERP TOP {TOP_GAINERS}: {top_display}")
-        
-        for sym,gain in top:
-            if gain<1: continue
-            coin_name = sym.split('/')[0].upper()  # <-- ONLY COIN NAME
-            # CHECK 24h - if this coin already sent today, skip ALL exchanges and TFs
-            if coin_name in hist and time.time()-hist[coin_name]<COOLDOWN*3600:
-                continue
+gainers=[]
+for s in syms:
+    g=get_48h_gain(ex,s)
+    if g>-999: gainers.append((s,g))
+gainers.sort(key=lambda x:x[1],reverse=True)
+top=gainers[:TOP_GAINERS]
 
-            for tf in TIMEFRAMES:
-                df=fetch_tf(ex,sym,tf)
-                if df is None or len(df)<100: continue
-                sig=detect_bearish_choch(df)
-                if not sig: continue
-                chart,live=draw(df,sym,sig,exn,tf,gain)
-                cap=f"🔴 *BEAR CHoCH {tf} FUT PERP*\n\n*Pair:* `{sym}` | {exn}\n*48h:* `+{gain:.2f}%` TOP {TOP_GAINERS} FUTURES\n*Break:* `{sig['lower']:.6f}`\n*Sell Zone:* `{sig['fib_bot']:.6f}`-`{sig['fib_top']:.6f}`\n*SL:* `{sig['rangeTop']:.6f}`\n*Live:* `{live:.6f}`\n*Time:* {now.strftime('%H:%M PKT')} REAL-TIME"
-                send_photo(chart,cap)
-                hist[coin_name]=time.time()  # <-- SAVE ONLY COIN, NOT EXCHANGE
-                save_hist(hist)
-                found+=1
-                time.sleep(0.6)
-                break  # break TF loop after first found, don't send 10m AND 15m same coin
-            if coin_name in hist and time.time()-hist[coin_name]<60: 
-                continue  # already sent this coin in this run, skip other exchanges
-    except Exception as e: print(f"{exn} {e}"); continue
+top_display=[]
+for s,c in top[:10]:
+    coin=s.split('/')[0]
+    top_display.append(f"{coin} {c:.1f}%")
+print(f"MEXC TOP {TOP_GAINERS}: {top_display}", flush=True)
 
-if found==0 and not SILENT: send_msg(f"No BEAR CHoCH TOP {TOP_GAINERS} FUT PERP 10m+15m")
-else: print(f"Found {found}")
+for sym,gain in top:
+    if gain<1: continue
+    coin_name=sym.split('/')[0].upper()
+    if coin_name in hist and time.time()-hist[coin_name]<COOLDOWN*3600:
+        print(f"Skip {coin_name} - already sent in 24h", flush=True)
+        continue
+    for tf in TIMEFRAMES:
+        print(f"Checking {coin_name} {tf} gain {gain:.1f}%", flush=True)
+        df=fetch_tf(ex,sym,tf)
+        if df is None or len(df)<100: continue
+        sig=detect_bearish_choch(df)
+        if not sig: continue
+        chart,live=draw(df,sym,sig,'MEXC',tf,gain)
+        cap=f"🔴 *BEAR CHoCH {tf} FUT PERP*\n\n*Pair:* `{sym}` | MEXC\n*48h:* `+{gain:.2f}%` TOP {TOP_GAINERS} FUTURES\n*Break:* `{sig['lower']:.6f}`\n*Sell Zone:* `{sig['fib_bot']:.6f}`-`{sig['fib_top']:.6f}`\n*SL:* `{sig['rangeTop']:.6f}`\n*Live:* `{live:.6f}`\n*Time:* {now.strftime('%H:%M PKT')}"
+        send_photo(chart,cap)
+        hist[coin_name]=time.time()
+        save_hist(hist)
+        found+=1
+        print(f"ALERT SENT {coin_name}", flush=True)
+        time.sleep(0.5)
+        break
+
+print(f"Done. Found {found}", flush=True)
