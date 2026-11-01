@@ -1,4 +1,3 @@
-ccxt
 pandas
 requests
 matplotlib
