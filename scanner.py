@@ -69,9 +69,9 @@ def detect(df):
     if len(df)<80: return None
     df=df.copy()
     df['ema20']=df['c'].ewm(span=EMA_LEN,adjust=False).mean()
-    df['rsi20']=rsi(df['c'],20)
-    df['rsi40']=rsi(df['c'],40)
-    df['rsi60']=rsi(df['c'],60)
+    df['rsi6']=rsi(df['c'],6)
+    df['rsi12']=rsi(df['c'],12)
+    df['rsi24']=rsi(df['c'],24)
     last=df.iloc[-2]
     p1=df.iloc[-3]
     p2=df.iloc[-4]
@@ -119,6 +119,7 @@ def draw(df,symbol,pat,conf,tf):
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12,6), facecolor='black', gridspec_kw={'height_ratios':[3,1]}, sharex=True)
     ax1.set_facecolor('black')
     ax2.set_facecolor('black')
+    # Candle chart
     for i,(_,r) in enumerate(view.iterrows()):
         col='#089981' if r['c']>=r['o'] else '#f23645'
         ax1.plot([i,i],[r['l'],r['h']],color=col,lw=1)
@@ -127,10 +128,10 @@ def draw(df,symbol,pat,conf,tf):
     ax1.set_title(f"{symbol} {tf} {pat} | {' | '.join(conf)}",color='white',fontsize=10,fontweight='bold')
     ax1.legend(facecolor='black',labelcolor='white',fontsize=6)
     ax1.grid(alpha=0.15)
-    # EDITED: RSI20 Red, RSI40 Blue, RSI60 Yellow
-    ax2.plot(view['rsi20'].values, color='#FF0000', lw=1.2, label=f"RSI20:{view['rsi20'].iloc[-2]:.2f}")
-    ax2.plot(view['rsi40'].values, color='#0080FF', lw=1.2, label=f"RSI40:{view['rsi40'].iloc[-2]:.2f}")
-    ax2.plot(view['rsi60'].values, color='#FFD700', lw=1.2, label=f"RSI60:{view['rsi60'].iloc[-2]:.2f}")
+    # RSI panel like your screenshot
+    ax2.plot(view['rsi6'].values, color='#FF6B6B', lw=1, label=f"RSI6:{view['rsi6'].iloc[-2]:.2f}")
+    ax2.plot(view['rsi12'].values, color='#4D96FF', lw=1, label=f"RSI12:{view['rsi12'].iloc[-2]:.2f}")
+    ax2.plot(view['rsi24'].values, color='#FFD93D', lw=1, label=f"RSI24:{view['rsi24'].iloc[-2]:.2f}")
     ax2.axhline(70,color='gray',ls='--',lw=0.5)
     ax2.axhline(30,color='gray',ls='--',lw=0.5)
     ax2.set_ylim(0,100)
@@ -163,10 +164,11 @@ def process(symbol):
             conf=confirmations(sig)
             if not conf: continue
             chart=draw(sig['df'],symbol,pat,conf,tf)
-            r20=sig['df'].iloc[-2]['rsi20']
-            r40=sig['df'].iloc[-2]['rsi40']
-            r60=sig['df'].iloc[-2]['rsi60']
-            cap=f"⭐ *{pat}* `{tf}`\n*Pair:* `{symbol}`\n*Conf:* `{' | '.join(conf)}`\n*RSI20:{r20:.2f} RSI40:{r40:.2f} RSI60:{r60:.2f}*\n*EMA20:* `{sig['df'].iloc[-2]['ema20']:.6f}`"
+            # RSI values for caption
+            r6=sig['df'].iloc[-2]['rsi6']
+            r12=sig['df'].iloc[-2]['rsi12']
+            r24=sig['df'].iloc[-2]['rsi24']
+            cap=f"⭐ *{pat}* `{tf}`\n*Pair:* `{symbol}`\n*Conf:* `{' | '.join(conf)}`\n*RSI6:{r6:.2f} RSI12:{r12:.2f} RSI24:{r24:.2f}*\n*EMA20:* `{sig['df'].iloc[-2]['ema20']:.6f}` *Close:* `{sig['last']['c']:.6f}`"
             send_photo(chart,cap)
             cnt+=1
         return cnt
