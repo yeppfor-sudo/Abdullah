@@ -88,16 +88,59 @@ def api_get(path, params=None, tries=4):
     raise RuntimeError("request failed")
 
 
+# Non-crypto words that MEXC uses in concept tags / names (stocks, ETFs, metals, forex, commodities)
+NON_CRYPTO_WORDS = (
+    "stock", "equity", "equities", "etf", "metal", "commodit", "forex", "fx",
+    "tradfi", "index future", "gold", "silver", "oil", "energy", "nasdaq", "s&p",
+)
+
+# Known non-crypto base tickers (metals, energy, big stocks and ETFs). Add more with EXCLUDE_SYMBOLS.
+NON_CRYPTO_BASES = {
+    "XAU", "XAG", "XPT", "XPD", "GOLD", "SILVER", "COPPER", "PLATINUM", "PALLADIUM",
+    "WTI", "BRENT", "USOIL", "UKOIL", "OIL", "NATGAS", "NGAS",
+    "SPX", "SPY", "QQQ", "DIA", "IWM", "VOO", "VTI", "GLD", "SLV", "USO", "TLT", "ARKK",
+    "NAS100", "US30", "US500", "DXY", "VIX",
+    "TSLA", "AAPL", "NVDA", "MSFT", "GOOGL", "GOOG", "AMZN", "META", "NFLX", "AMD", "INTC",
+    "COIN", "MSTR", "HOOD", "PLTR", "BABA", "TSM", "ORCL", "UBER", "DIS", "PYPL",
+    "SQ", "SHOP", "CRCL", "GME", "AMC", "BA", "JPM", "V", "MA", "WMT", "KO", "NKE",
+}
+
+
+def _is_crypto(c):
+    """Return (True, '') for crypto perpetuals, else (False, reason)."""
+    base = str(c.get("baseCoin", "")).upper()
+    if base in NON_CRYPTO_BASES:
+        return False, "known non-crypto ticker"
+    # only the concept tags are checked (never the coin name, to avoid false hits like GOLDEN or TOIL)
+    tags = " ".join(str(x) for x in (c.get("conceptPlate") or [])).lower()
+    for w in NON_CRYPTO_WORDS:
+        if w in tags:
+            return False, f"tag contains '{w}'"
+    return True, ""
+
+
 def list_symbols():
     data = api_get("/api/v1/contract/detail")
     if isinstance(data, dict):
         data = [data]
-    out = []
+    out, skipped = [], []
     for c in data:
         sym = c.get("symbol", "")
-        if c.get("quoteCoin") == "USDT" and sym.endswith("_USDT") and c.get("state", 0) == 0:
-            if sym.upper() not in EXCLUDE:
-                out.append(sym)
+        # USDT-margined, active, perpetual only
+        if c.get("quoteCoin") != "USDT" or not sym.endswith("_USDT"):
+            continue
+        if c.get("state", 0) != 0 or c.get("futureType", 1) != 1:
+            continue
+        if sym.upper() in EXCLUDE:
+            skipped.append((sym, "EXCLUDE_SYMBOLS"))
+            continue
+        ok, why = _is_crypto(c)
+        if ok:
+            out.append(sym)
+        else:
+            skipped.append((sym, why))
+    if skipped:
+        print(f"Skipped {len(skipped)} non-crypto contracts: " + ", ".join(s for s, _ in sorted(skipped)))
     return sorted(out)
 
 
