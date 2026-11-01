@@ -1,7 +1,7 @@
-name: scan
+name: rsi20-below-20
 on:
   schedule:
-    - cron: '5 0 * * *'
+    - cron: '0 */4 * * *'  # every 4H for 4H 8H 12H timeframes
   workflow_dispatch:
 
 permissions:
@@ -10,7 +10,7 @@ permissions:
 jobs:
   scanner:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -18,20 +18,10 @@ jobs:
           python-version: '3.11'
       - name: Install deps
         run: pip install -r requirements.txt
-      - name: Run scanner
+      - name: Run RSI20 scanner
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          TIMEFRAMES: "1D,2D,3D,5D,7D"
-          EMA_LEN: "20"
         run: python -u scanner.py
-      - name: Save state
-        if: always()
-        run: |
-          git config --global user.name "bot"
-          git config --global user.email "bot@bot.com"
-          git add . || true
-          git diff --staged --quiet || git commit -m "state" || true
-          git push || true
